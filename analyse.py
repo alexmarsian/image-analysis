@@ -184,12 +184,55 @@ def stitch_regions(tiff_file: np.ndarray, coordinates: list) -> np.ndarray:
 
     Args:
         tiff_file (np.ndarray): The tiff image to be reduced.
-        coordinates (list): The coordinates of the regions of interest.
+        coordinates (dict): The coordinates of the regions of interest, supplied as 
+        a dictionary of {channel_number: {roi: coords, bg: coords}}.
 
     Returns:
         np.ndarray: The reduced tiff image.
     """
-    #TODO: Implement this function
+    # get the set of x and y coordinates for all ROIs for each channel
+    x_coords = {}
+    y_coords = {}
+    for channel in coordinates.keys():
+        x_coords[channel] = []
+        y_coords[channel] = []
+        for region in range(len(coordinates[channel]['roi'])):
+            y, x = np.unravel_index(coordinates[channel]['roi'][region], tiff_file.shape[2:])
+            # adjust the x and y coords to be the smallest square around the ROI
+            y, x = adjust_coordinates(y, x, size=10)
+            x_coords[channel] += x
+            y_coords[channel] += y
+    # extract the regions of interest from the tiff image for each channel
+    channel_tiffs = []
+    for channel in coordinates.keys():
+        channel_tiffs.append(tiff_file[:, channel, y_coords[channel], x_coords[channel]])
+    # restack the channels
+    tiff_file = np.stack(channel_tiffs, axis=1)
+    return tiff_file
+
+def adjust_coordinates(y: int, x: int, size: int=10) -> tuple:
+    """Cuts a square of sizexsize around the center of the ROI.
+    Args:
+        y (int): The y coordinate of the ROI.
+        x (int): The x coordinate of the ROI.
+
+    Returns:
+        tuple: The adjusted x and y coordinates.
+    """
+    # Make sure the size is even
+    if size % 2 != 0:
+        size += 1
+    # Find the center of the ROI
+    center = (int((max(y) - min(y))/2), int((max(x) - min(x))/2))
+    # Generate all possible x,y pairs that form a size*size square around the center
+    x = []
+    y = []
+    for i in range(center[0]-size/2, center[0]+size/2):
+        for j in range(center[1]-size/2, center[1]+size/2):
+            x.append(j)
+            y.append(i)
+    return (y, x)
+
 
 def correct_frame_order(tiff_file: np.ndarray, metadata: str) -> np.ndarray:
     """Corrects the frame order of the tiff image based on the metadata file.
