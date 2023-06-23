@@ -11,6 +11,7 @@ from pathlib import Path
 import tifffile as tiff
 import click
 from typing import Union
+from kneed import KneeLocator
 
 @click.command()
 @click.argument('input_path', type=click.Path(exists=True))
@@ -46,12 +47,19 @@ def reduce_tiff(tiff_file: np.ndarray, coordinates_path: str, metadata: Union[st
     Returns:
         np.ndarray: The reduced tiff image. With frame order corrected if metadata is provided.
     """
-    # Get the ROI and background coordinates
-    coordinates = extract_coordinates(tiff_file, coordinates_path)
-    # Find the first frame after the background has steadied
-    first_frame = find_first_frame(tiff_file, coordinates)
+    # Get the ROI and background coordinates for all channels
+    coordinates_files = Path(coordinates_path).glob('*.csv')
+    channel_coords = {i: {'roi': None, 'bg': None} for i in range(1, tiff_file.shape[2]+1)}
+    for c in coordinates_files:
+        channel = c.split('_')[2]
+        if 'ROI' in c:
+            channel_coords[channel]['roi'] = extract_coordinates(c)
+        elif 'Background' in c:
+            channel_coords[channel]['bg'] = extract_coordinates(c)
+    # Find the first frame across all channels after the background has steadied
+    first_frame = find_global_first_frame(tiff_file, channel_coords)
     # Stitch the regions of interest into a smaller image
-    tiff_file = stitch_regions(tiff_file[first_frame, :, :, :], coordinates)
+    tiff_file = stitch_regions(tiff_file[first_frame, :, :, :], channel_coords)
     # Correct the frame order if metadata is provided
     if metadata:
         tiff_file = correct_frame_order(tiff_file, metadata)
@@ -65,47 +73,112 @@ def run_picasso(tiff_path: str) -> None:
     """
     #TODO: Implement this function
 
-# First extract the coordinates for both channels
-def extract_coordinates(background_pos_file : str, roi_pos_file :str):
+def extract_coordinates(coordinates_file : str):
     """ 
     Extract the coordinates from the background and ROI position files
 
     Parameters
     ----------
-    background_pos_file : str
-        The path to the background position file
-    roi_pos_file : str
-        The path to the ROI position file
+    coordinates_file : str
+        The path to the coordinates file
 
     Returns
     -------
-    bg_pos : list
+    pos : list
         A list of lists of ints representing the background coordinates
     r_pos : list
         A list of lists of ints representing the ROI coordinates
     """
-    with open(background_pos_file, 'r') as f:
-        bg_pos = f.readlines()[2:]
+    with open(coordinates_file, 'r') as f:
+        c = f.readlines()[2:]
         # convert the list of lists to a list of lists of ints
-        bg_pos = [[int(val) for val in region.strip().split(',')] for region in bg_pos]
-    with open(roi_pos_file, 'r') as f:
-        r_pos = f.readlines()[2:]
-        # convert the list of lists to a list of lists of ints
-        r_pos = [[int(val) for val in region.strip().split(',')] for region in r_pos]
-    return bg_pos, r_pos
+        c = [[int(val) for val in region.strip().split(',')] for region in c]
+    return c
 
-def find_first_frame(tiff_file: np.ndarray, coordinates: list) -> np.ndarray:
-    """Finds the first frame after the background has steadied.
+def find_global_first_frame(tiff_file: np.ndarray, coordinates: list) -> int:
+    """Finds the first frame after the background has steadied across all channels.
 
     Args:
         tiff_file (np.ndarray): The tiff image to be reduced.
-        coordinates (list): The coordinates of the regions of interest.
+        coordinates (dict): The coordinates of the regions of interest, supplied as 
+        a dictionary of {channel_number: {roi: coords, bg: coords}}.
 
     Returns:
-        np.ndarray: The first frame after the background has steadied.
+        int: The first frame after the background has steadied.
     """
-    #TODO: Implement this function
+    # extract all the average background intensities for all frames in each channel
+    avg_bg_intensities = {}
+    start_frames = {}
+    for channel in coordinates.keys():
+        for region in range(len(coordinates[channel]['bg'])):
+            y, x = np.unravel_index(coordinates[channel]['bg'][region], tiff_file.shape[2:])
+            # get the average of the region coordinates for all frames
+            avg_bg_intensities[channel].append(np.mean(tiff_file[:, channel, y, x], axis=tiff_file.shape[2:]))
+        # Now get all the start frames for each channel
+        start_frames[channel] = pick_start_frames(avg_bg_intensities[channel])
+    # Find the minimum start frame across all channels
+    min_start_frame = find_smallest_value(start_frames)
+    return int(min_start_frame)
 
+def find_smallest_value(dictionary):
+    """Finds the smallest value in an arbitrarily nested dictionary.
+
+    Args:
+        dictionary (dict): The dictionary to be searched.
+
+    Returns:
+        float: The smallest value in the dictionary.
+    """
+    smallest = float('inf')  # Initialize with positive infinity
+    for value in dictionary.values():
+        if isinstance(value, dict):
+            # If the value is a nested dictionary, recursively call the function
+            nested_smallest = find_smallest_value(value)
+            smallest = min(smallest, nested_smallest)
+        else:
+            # If the value is a number, update the smallest if necessary
+            if isinstance(value, (int, float)) and value < smallest:
+                smallest = value
+    return smallest
+
+# Create a function to pick the start frame for each background based on the knee of the moving average of the background intensity
+def pick_start_frames(avg_bg: np.array, ma: int=100, start_threshold: int=1) -> dict:
+    """ 
+    Pick the start frame for each background based on the knee of the moving average of the background intensity
+
+    Parameters
+    ----------
+    avg_bg : np.array
+        An array of average background intensities for each ROI across all frames
+    ma : int
+        The number of frames to use to calculate the moving average
+    start_threshold : int
+        The threshold for the change in background intensity to determine the start frame
+
+    Returns
+    -------
+    start_frames : dict
+        A dictionary of {background_number (int): start_frame (int)}
+    """
+    start_frames = {}
+    for i in range(len(avg_bg)):
+        # calculate the moving average across 50 frames
+        y = np.convolve(avg_bg[i][:-1], np.ones(ma), 'valid') / ma
+        # find the first frame where the change in background intensity is greater than a threshold
+        for k in range(len(y)-1):
+            if y[k+1] - y[k] > start_threshold:
+                start = k
+                break
+        # Get the knee of this moving average data
+        x = np.arange(len(y))
+        try:
+            kneedle = KneeLocator(x[start:], y[start:], curve='concave', direction='increasing')
+        except:
+            kneedle = KneeLocator(x[300:], y[300:], curve='concave', direction='increasing')
+        # Get the start frame for the background
+        start_frames[i] = kneedle.knee
+    return start_frames
+    
 def stitch_regions(tiff_file: np.ndarray, coordinates: list) -> np.ndarray:
     """Stitches the regions of interest into a smaller image.
 
