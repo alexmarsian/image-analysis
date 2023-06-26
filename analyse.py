@@ -18,7 +18,7 @@ from kneed import KneeLocator
 @click.argument('coordinates_path', type=click.Path(exists=True))
 @click.argument('output_path', type=click.Path(exists=False))
 @click.option('--metadata', type=Union[str, None], default='metadata.txt', help='Path to metadata file')
-def main(input_path: str, coordinates_path: str, output_path: str, metadata: Union[str, None]):
+def main(input_path: click.Path, coordinates_path: click.Path, output_path: click.Path, metadata: Union[str, None]):
     """A program to analyse tiff images of cells.
 
     Args:
@@ -36,7 +36,26 @@ def main(input_path: str, coordinates_path: str, output_path: str, metadata: Uni
     # Pass the reduced tiff image into picasso
     run_picasso(output_path)
 
-def reduce_tiff(tiff_file: np.ndarray, coordinates_path: str, metadata: Union[str, None]) -> np.ndarray:
+# Adding non-click version of main function for import into other scripts
+def run(input_path: Union[Path, str], coordinates_path: Union[Path, str], output_path: Union[Path, str], metadata: Union[Path, str, None]):
+    """A program to analyse tiff images of cells.
+
+    Args:
+        input_path (str): Path to the tiff images. 
+        coordinates_path (str): Path to the coordinates file.
+        output_path (str): Path to the output file.
+        metadata (Union[str, None]): Path to the metadata file, if it exists.
+    """
+    # Load the tiff image
+    t = tiff.imread(input_path)
+    # Reduce the tiff image
+    t = reduce_tiff(t, coordinates_path, metadata)
+    # Save the reduced tiff image
+    tiff.imwrite(output_path, t)
+    # Pass the reduced tiff image into picasso
+    run_picasso(output_path)
+
+def reduce_tiff(tiff_file: np.ndarray, coordinates_path: Union[Path, str], metadata: Union[str, None]) -> np.ndarray:
     """Reduces the size of the tiff image by extracting only the regions of interest.
 
     Args:
@@ -49,12 +68,13 @@ def reduce_tiff(tiff_file: np.ndarray, coordinates_path: str, metadata: Union[st
     """
     # Get the ROI and background coordinates for all channels
     coordinates_files = Path(coordinates_path).glob('*.csv')
-    channel_coords = {i: {'roi': None, 'bg': None} for i in range(1, tiff_file.shape[2]+1)}
+    coordinates_files = [c for c in coordinates_files if 'Positions' in str(c)]
+    channel_coords = {str(i): {'roi': None, 'bg': None} for i in range(1, tiff_file.shape[1]+1)}
     for c in coordinates_files:
-        channel = c.split('_')[2]
-        if 'ROI' in c:
+        channel = str(c.stem).split('_')[2]
+        if 'ROI' in str(c.stem):
             channel_coords[channel]['roi'] = extract_coordinates(c)
-        elif 'Background' in c:
+        elif 'Background' in str(c.stem):
             channel_coords[channel]['bg'] = extract_coordinates(c)
     # Find the first frame across all channels after the background has steadied
     first_frame = find_global_first_frame(tiff_file, channel_coords)
@@ -71,7 +91,10 @@ def run_picasso(tiff_path: str) -> None:
     Args:
         tiff_path (str): Path to the reduced tiff image.
     """
+    # Appears we need to run the localise function from the picasso package
     #TODO: Implement this function
+    print('Running picasso...')
+    pass
 
 def extract_coordinates(coordinates_file : str):
     """ 
@@ -95,7 +118,7 @@ def extract_coordinates(coordinates_file : str):
         c = [[int(val) for val in region.strip().split(',')] for region in c]
     return c
 
-def find_global_first_frame(tiff_file: np.ndarray, coordinates: list) -> int:
+def find_global_first_frame(tiff_file: np.ndarray, coordinates: dict) -> int:
     """Finds the first frame after the background has steadied across all channels.
 
     Args:
@@ -107,18 +130,18 @@ def find_global_first_frame(tiff_file: np.ndarray, coordinates: list) -> int:
         int: The first frame after the background has steadied.
     """
     # extract all the average background intensities for all frames in each channel
-    avg_bg_intensities = {}
+    avg_bg_intensities = {i: [] for i in coordinates.keys()}
     start_frames = {}
     for channel in coordinates.keys():
         for region in range(len(coordinates[channel]['bg'])):
             y, x = np.unravel_index(coordinates[channel]['bg'][region], tiff_file.shape[2:])
             # get the average of the region coordinates for all frames
-            avg_bg_intensities[channel].append(np.mean(tiff_file[:, channel, y, x], axis=tiff_file.shape[2:]))
+            substack = tiff_file[:, int(channel)-1, y, x]
+            avg_bg_intensities[channel].append(np.mean(substack, axis=1))
         # Now get all the start frames for each channel
         start_frames[channel] = pick_start_frames(avg_bg_intensities[channel])
     # Find the minimum start frame across all channels
-    min_start_frame = find_smallest_value(start_frames)
-    return int(min_start_frame)
+    return find_smallest_value(start_frames)
 
 def find_smallest_value(dictionary):
     """Finds the smallest value in an arbitrarily nested dictionary.
@@ -130,15 +153,8 @@ def find_smallest_value(dictionary):
         float: The smallest value in the dictionary.
     """
     smallest = float('inf')  # Initialize with positive infinity
-    for value in dictionary.values():
-        if isinstance(value, dict):
-            # If the value is a nested dictionary, recursively call the function
-            nested_smallest = find_smallest_value(value)
-            smallest = min(smallest, nested_smallest)
-        else:
-            # If the value is a number, update the smallest if necessary
-            if isinstance(value, (int, float)) and value < smallest:
-                smallest = value
+    for key in dictionary.keys():
+        smallest = min(smallest, min(dictionary[key].values()))
     return smallest
 
 # Create a function to pick the start frame for each background based on the knee of the moving average of the background intensity
