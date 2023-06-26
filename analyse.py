@@ -14,11 +14,12 @@ from typing import Union
 from kneed import KneeLocator
 
 @click.command()
-@click.argument('input_path', type=click.Path(exists=True))
-@click.argument('coordinates_path', type=click.Path(exists=True))
-@click.argument('output_path', type=click.Path(exists=False))
+@click.argument('input_path', type=click.Path(exists=True, path_type=Path))
+@click.argument('coordinates_path', type=click.Path(exists=True, path_type=Path))
+@click.argument('output_path', type=click.Path(exists=False, path_type=Path))
 @click.option('--metadata', type=Union[str, None], default='metadata.txt', help='Path to metadata file')
-def main(input_path: click.Path, coordinates_path: click.Path, output_path: click.Path, metadata: Union[str, None]):
+@click.option('--size', type=int, default=10, help='Size of the square to be cut around the center of the ROI')
+def main(input_path: click.Path, coordinates_path: click.Path, output_path: click.Path, metadata: Union[str, None], size: int):
     """A program to analyse tiff images of cells.
 
     Args:
@@ -26,18 +27,12 @@ def main(input_path: click.Path, coordinates_path: click.Path, output_path: clic
         coordinates_path (str): Path to the coordinates file.
         output_path (str): Path to the output file.
         metadata (Union[str, None]): Path to the metadata file, if it exists.
+        size (int, optional): The size of the square to be cut around the center of the ROI. Defaults to 10.
     """
-    # Load the tiff image
-    t = tiff.imread(input_path)
-    # Reduce the tiff image
-    t = reduce_tiff(t, coordinates_path, metadata)
-    # Save the reduced tiff image
-    tiff.imwrite(output_path, t)
-    # Pass the reduced tiff image into picasso
-    run_picasso(output_path)
+    run(input_path, coordinates_path, output_path, metadata, size)
 
 # Adding non-click version of main function for import into other scripts
-def run(input_path: Union[Path, str], coordinates_path: Union[Path, str], output_path: Union[Path, str], metadata: Union[Path, str, None]):
+def run(input_path: Union[Path, str], coordinates_path: Union[Path, str], output_path: Union[Path, str], metadata: Union[Path, str, None], size: int=10):
     """A program to analyse tiff images of cells.
 
     Args:
@@ -45,23 +40,25 @@ def run(input_path: Union[Path, str], coordinates_path: Union[Path, str], output
         coordinates_path (str): Path to the coordinates file.
         output_path (str): Path to the output file.
         metadata (Union[str, None]): Path to the metadata file, if it exists.
+        size (int, optional): The size of the square to be cut around the center of the ROI. Defaults to 10.
     """
     # Load the tiff image
     t = tiff.imread(input_path)
     # Reduce the tiff image
-    t = reduce_tiff(t, coordinates_path, metadata)
+    t = reduce_tiff(t, coordinates_path, metadata, size)
     # Save the reduced tiff image
-    tiff.imwrite(output_path, t)
+    tiff.imwrite(output_path, t, shape=t.shape)
     # Pass the reduced tiff image into picasso
     run_picasso(output_path)
 
-def reduce_tiff(tiff_file: np.ndarray, coordinates_path: Union[Path, str], metadata: Union[str, None]) -> np.ndarray:
+def reduce_tiff(tiff_file: np.ndarray, coordinates_path: Union[Path, str], metadata: Union[str, None], size: int=10) -> np.ndarray:
     """Reduces the size of the tiff image by extracting only the regions of interest.
 
     Args:
         tiff_file (np.ndarray): The tiff image to be reduced.
         coordinates_path (str): Path to the coordinates file.
         metadata (Union[str, None]): Path to the metadata file, if it exists.
+        size (int, optional): The size of the square to be cut around the center of the ROI. Defaults to 10.
 
     Returns:
         np.ndarray: The reduced tiff image. With frame order corrected if metadata is provided.
@@ -79,7 +76,7 @@ def reduce_tiff(tiff_file: np.ndarray, coordinates_path: Union[Path, str], metad
     # Find the first frame across all channels after the background has steadied
     first_frame = find_global_first_frame(tiff_file, channel_coords)
     # Stitch the regions of interest into a smaller image
-    tiff_file = stitch_regions(tiff_file[first_frame, :, :, :], channel_coords)
+    tiff_file = stitch_regions(tiff_file[first_frame:, :, :, :], channel_coords, size=size)
     # Correct the frame order if metadata is provided
     if metadata:
         tiff_file = correct_frame_order(tiff_file, metadata)
@@ -195,16 +192,19 @@ def pick_start_frames(avg_bg: np.array, ma: int=100, start_threshold: int=1) -> 
         start_frames[i] = kneedle.knee
     return start_frames
     
-def stitch_regions(tiff_file: np.ndarray, coordinates: list) -> np.ndarray:
+def stitch_regions(tiff_file: np.ndarray, coordinates: list, size: int=10) -> np.ndarray:
     """Stitches the regions of interest into a smaller image.
 
     Args:
-        tiff_file (np.ndarray): The tiff image to be reduced.
+        tiff_file (np.ndarray): The tiff image to be reduced, of shape (frames, channels, y, x).
         coordinates (dict): The coordinates of the regions of interest, supplied as 
         a dictionary of {channel_number: {roi: coords, bg: coords}}.
+        size (int, optional): The size of the square to be cut around the center of the ROI. Defaults to 10.
 
     Returns:
-        np.ndarray: The reduced tiff image.
+        np.ndarray: The reduced tiff image with shape (frames, channels, num_rois, size, size).
+        where the num_rois is the maximum number of ROIs across all channels, and 
+        any channels with fewer ROIs than this are padded with arrays of zeros.
     """
     # get the set of x and y coordinates for all ROIs for each channel
     x_coords = {}
@@ -215,13 +215,23 @@ def stitch_regions(tiff_file: np.ndarray, coordinates: list) -> np.ndarray:
         for region in range(len(coordinates[channel]['roi'])):
             y, x = np.unravel_index(coordinates[channel]['roi'][region], tiff_file.shape[2:])
             # adjust the x and y coords to be the smallest square around the ROI
-            y, x = adjust_coordinates(y, x, size=10)
+            y, x = adjust_coordinates(y, x, size=size)
             x_coords[channel] += x
             y_coords[channel] += y
     # extract the regions of interest from the tiff image for each channel
     channel_tiffs = []
     for channel in coordinates.keys():
-        channel_tiffs.append(tiff_file[:, channel, y_coords[channel], x_coords[channel]])
+        channel_tiffs.append(tiff_file[:, int(channel)-1, y_coords[channel], x_coords[channel]])
+    # get the number of rois for each channel
+    num_rois = [len(coordinates[channel]['roi']) for channel in coordinates.keys()]
+    # reshape the tiff images to be of shape (frames, num_rois, size, size)
+    for i in range(len(channel_tiffs)):
+        channel_tiffs[i] = np.reshape(channel_tiffs[i], (channel_tiffs[i].shape[0], num_rois[i], size, size))
+    # if the number of rois is not the same for each channel, pad the smaller channels with size*size arrays of zeros
+    max_rois = max(num_rois)
+    for i in range(len(channel_tiffs)):
+        if num_rois[i] < max_rois:
+            channel_tiffs[i] = np.concatenate((channel_tiffs[i], np.zeros((channel_tiffs[i].shape[0], max_rois-num_rois[i], size, size))), axis=1)
     # restack the channels
     tiff_file = np.stack(channel_tiffs, axis=1)
     return tiff_file
@@ -239,12 +249,12 @@ def adjust_coordinates(y: int, x: int, size: int=10) -> tuple:
     if size % 2 != 0:
         size += 1
     # Find the center of the ROI
-    center = (int((max(y) - min(y))/2), int((max(x) - min(x))/2))
+    center = (int((max(y) - min(y))//2), int((max(x) - min(x))//2))
     # Generate all possible x,y pairs that form a size*size square around the center
     x = []
     y = []
-    for i in range(center[0]-size/2, center[0]+size/2):
-        for j in range(center[1]-size/2, center[1]+size/2):
+    for i in range(center[0]-size//2, center[0]+size//2):
+        for j in range(center[1]-size//2, center[1]+size//2):
             x.append(j)
             y.append(i)
     return (y, x)
@@ -261,6 +271,7 @@ def correct_frame_order(tiff_file: np.ndarray, metadata: str) -> np.ndarray:
         np.ndarray: The reduced tiff image.
     """
     #TODO: Implement this function
+    return tiff_file
 
 if __name__ == "__main__":
     main()
