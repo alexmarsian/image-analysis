@@ -12,6 +12,7 @@ import tifffile as tiff
 import click
 from typing import Union
 from kneed import KneeLocator
+import lmfit
 
 @click.command()
 @click.argument('input_path', type=click.Path(exists=True, path_type=Path))
@@ -49,7 +50,7 @@ def run(input_path: Union[Path, str], coordinates_path: Union[Path, str], output
     # Save the reduced tiff image
     tiff.imwrite(output_path, t, shape=t.shape)
     # Pass the reduced tiff image into picasso
-    run_picasso(output_path)
+    fit_gaussians(output_path)
 
 def reduce_tiff(tiff_file: np.ndarray, coordinates_path: Union[Path, str], metadata: Union[str, None], size: int=10) -> np.ndarray:
     """Reduces the size of the tiff image by extracting only the regions of interest.
@@ -82,16 +83,42 @@ def reduce_tiff(tiff_file: np.ndarray, coordinates_path: Union[Path, str], metad
         tiff_file = correct_frame_order(tiff_file, metadata)
     return tiff_file
 
-def run_picasso(tiff_path: str) -> None:
-    """Runs the picasso algorithm on the reduced tiff image.
+def fit_gaussians(tiff_path: str) -> None:
+    """Fits 2D guassians to all ROIs across all channels in the tiff image.
+    Only fits for regions that have a signal to noise ratio greater than 3.
 
     Args:
-        tiff_path (str): Path to the reduced tiff image.
+        tiff_path (str): Path to the reduced tiff image with shape (frames, channels, num_rois, size, size).
     """
-    # Appears we need to run the localise function from the picasso package
-    #TODO: Implement this function
-    print('Running picasso...')
-    pass
+    print('Fitting gaussians...')
+    # Create a 2D gaussian model
+    model = lmfit.models.Gaussian2dModel()
+    tiff_file = tiff.imread(tiff_path)
+    gaussian_params = {}
+    count = 0
+    frames, channels, num_rois, _,__ = tiff_file.shape
+    for channel in range(channels):
+        for frame in range(frames):
+            for roi in range(num_rois):
+                subtiff = tiff_file[frame, channel, roi, :, :]
+                # Find x and y coordinates of the maximum value in subframe
+                maxi_y, maxi_x = np.unravel_index(subtiff.argmax(), subtiff.shape)
+                # Fit 2D gaussian on the subframe using lmfit, centred on the maximum value
+                # Create a parameters object fo
+                params = model.make_params()
+                # Set the initial guesses for the parameters
+                params['amplitude'].set(value=subtiff[maxi_y, maxi_x])
+                params['centerx'].set(value=maxi_x)
+                params['centery'].set(value=maxi_y)
+                params['sigmax'].set(value=1)
+                params['sigmay'].set(value=1)
+                # Fit the model to the data
+                result = model.fit(subtiff, params, x=np.arange(subtiff.shape[1]), y=np.arange(subtiff.shape[0]),)
+                # Get the parameters of the fit
+                gaussian_params[(channel, frame, roi)] = result.params
+                count += 1
+                if count % 100 == 0:
+                    print(count / (num_rois * frames * 2))
 
 def extract_coordinates(coordinates_file : str):
     """ 
