@@ -13,6 +13,7 @@ import click
 from typing import Union
 from kneed import KneeLocator
 import lmfit
+from scipy import optimize
 
 @click.command()
 @click.argument('input_path', type=click.Path(exists=True, path_type=Path))
@@ -100,25 +101,44 @@ def fit_gaussians(tiff_path: str) -> None:
     for channel in range(channels):
         for frame in range(frames):
             for roi in range(num_rois):
-                subtiff = tiff_file[frame, channel, roi, :, :]
-                # Find x and y coordinates of the maximum value in subframe
-                maxi_y, maxi_x = np.unravel_index(subtiff.argmax(), subtiff.shape)
-                # Fit 2D gaussian on the subframe using lmfit, centred on the maximum value
-                # Create a parameters object fo
-                params = model.make_params()
-                # Set the initial guesses for the parameters
-                params['amplitude'].set(value=subtiff[maxi_y, maxi_x])
-                params['centerx'].set(value=maxi_x)
-                params['centery'].set(value=maxi_y)
-                params['sigmax'].set(value=1)
-                params['sigmay'].set(value=1)
-                # Fit the model to the data
-                result = model.fit(subtiff, params, x=np.arange(subtiff.shape[1]), y=np.arange(subtiff.shape[0]),)
+                # Fit 2D gaussian on the subframe using scipy, centred on the maximum value
+                params = fitgaussian(tiff_file[frame, channel, roi, :, :])
                 # Get the parameters of the fit
-                gaussian_params[(channel, frame, roi)] = result.params
+                gaussian_params[(channel, frame, roi)] = params
                 count += 1
-                if count % 100 == 0:
+                if count % 1000 == 0:
                     print(count / (num_rois * frames * 2))
+
+def gaussian(height, center_x, center_y, width_x, width_y):
+    """Returns a gaussian function with the given parameters"""
+    width_x = float(width_x)
+    width_y = float(width_y)
+    return lambda x,y: height*np.exp(
+                -(((center_x-x)/width_x)**2+((center_y-y)/width_y)**2)/2)
+
+def moments(data):
+    """Returns (height, x, y, width_x, width_y)
+    the gaussian parameters of a 2D distribution by calculating its
+    moments """
+    total = data.sum()
+    X, Y = np.indices(data.shape)
+    x = (X*data).sum()/total
+    y = (Y*data).sum()/total
+    col = data[:, int(y)]
+    width_x = np.sqrt(np.abs((np.arange(col.size)-x)**2*col).sum()/col.sum())
+    row = data[int(x), :]
+    width_y = np.sqrt(np.abs((np.arange(row.size)-y)**2*row).sum()/row.sum())
+    height = data.max()
+    return height, x, y, width_x, width_y
+
+def fitgaussian(data):
+    """Returns (height, x, y, width_x, width_y)
+    the gaussian parameters of a 2D distribution found by a fit"""
+    params = moments(data)
+    errorfunction = lambda p: np.ravel(gaussian(*p)(*np.indices(data.shape)) -
+                                 data)
+    p, success = optimize.leastsq(errorfunction, params)
+    return p
 
 def extract_coordinates(coordinates_file : str):
     """ 
