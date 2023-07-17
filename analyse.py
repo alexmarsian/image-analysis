@@ -19,21 +19,20 @@ from scipy import optimize
 @click.argument('input_path', type=click.Path(exists=True, path_type=Path))
 @click.argument('coordinates_path', type=click.Path(exists=True, path_type=Path))
 @click.argument('output_path', type=click.Path(exists=False, path_type=Path))
-@click.option('--metadata', type=Union[str, None], default='metadata.txt', help='Path to metadata file')
+@click.option('--metadata', type=str, default='metadata.txt', help='Path to metadata file')
 @click.option('--size', type=int, default=10, help='Size of the square to be cut around the center of the ROI')
 def main(input_path: click.Path, coordinates_path: click.Path, output_path: click.Path, metadata: Union[str, None], size: int):
     """A program to analyse tiff images of cells.
 
     Args:
         input_path (str): Path to the tiff images. 
-        coordinates_path (str): Path to the coordinates file.
+        coordinates_path (str): Path to the directory containing the coordinates file.
         output_path (str): Path to the output file.
         metadata (Union[str, None]): Path to the metadata file, if it exists.
         size (int, optional): The size of the square to be cut around the center of the ROI. Defaults to 10.
     """
     run(input_path, coordinates_path, output_path, metadata, size)
 
-# Adding non-click version of main function for import into other scripts
 def run(input_path: Union[Path, str], coordinates_path: Union[Path, str], output_path: Union[Path, str], metadata: Union[Path, str, None], size: int=10):
     """A program to analyse tiff images of cells.
 
